@@ -134,7 +134,8 @@ class Buffer:
         else:
             return chunk[:-length], chunk[-length:]
 
-def check_full_message(buffer):
+
+def read_full_message(buffer):
     """
     Check if there is full message in the buffer.
 
@@ -145,25 +146,35 @@ def check_full_message(buffer):
     buffer -- Buffer to check.
 
     Returns:
-    True if there is full message, False otherwise.
+     if there is full message, False otherwise.
+
+     Todo:
+     Test output.
+     Test buffer content.
     """
-    len_bytes = buffer.read(2, False)
+    len_bytes = buffer.peek(2)
     if len(len_bytes) < 2:
-        return False
+        return b''
     msg_len = int.from_bytes(len_bytes, 'big')
     if msg_len <= len(buffer) - 2:
-        return True
+        buffer.read(2)  # Reading length out of buffer.
+        return buffer.read(msg_len)
     else:
-        return False
+        return b''
 
 
-async def handle_client(reader, writer, handlers, buffer):
-    while True:
+async def handle_client(reader, writer, handlers, buffer, ending):
+    """
+    Todo:
+    Test if correct handlers are called (mocking handlers).
+    """
+    while not ending.done():
         data = await reader.read(read_size)
         buffer.write(data)
-        while check_full_message(buffer):
-            len_bytes = buffer.read(2)
-            msg_len = int.from_bytes(len_bytes)
-            message = buffer.read(msg_len)
-            args = make_args(message)
-            handlers[message[-1]](args)
+        while True:
+            message = read_full_message(buffer)
+            if not message:
+                break
+            handlers[message[-1]](message=message, writer=writer)
+
+    writer.close()
