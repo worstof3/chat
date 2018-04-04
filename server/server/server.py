@@ -137,20 +137,16 @@ class Buffer:
 
 def read_full_message(buffer):
     """
-    Check if there is full message in the buffer.
+    Check if there is full message in the buffer and if there is, read it.
 
     Function just peeks at first two bytes in buffer and treats them as message length. Then it checks if there is
-    enough bytes in the buffer.
+    enough bytes in the buffer. Buffer may be modified in this function.
 
     Args:
-    buffer -- Buffer to check.
+    buffer -- Buffer to check. It should have read and peek methods like Buffer defined in this module.
 
     Returns:
-     if there is full message, False otherwise.
-
-     Todo:
-     Test output.
-     Test buffer content.
+    Message if it is found, empty bytes object otherwise.
     """
     len_bytes = buffer.peek(2)
     if len(len_bytes) < 2:
@@ -165,8 +161,17 @@ def read_full_message(buffer):
 
 async def handle_client(reader, writer, handlers, buffer, ending):
     """
-    Todo:
-    Test if correct handlers are called (mocking handlers).
+    Read message from client and handle it.
+
+    Incoming data has to be buffered because some message may be split over two data chunks. Type of message is coded
+    in its last byte.
+
+    Args:
+    reader -- Reader connected to client.
+    writer -- Writer connected to client.
+    handlers -- Mapping bytes -> handlers.
+    buffer -- Object for buffering data.
+    ending -- Future indicating if coroutine should end.
     """
     while not ending.done():
         data = await reader.read(read_size)
@@ -175,6 +180,6 @@ async def handle_client(reader, writer, handlers, buffer, ending):
             message = read_full_message(buffer)
             if not message:
                 break
-            handlers[message[-1]](message=message, writer=writer)
+            handlers[message[-1:]](message=message, writer=writer)
 
     writer.close()
