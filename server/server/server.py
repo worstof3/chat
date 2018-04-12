@@ -1,4 +1,18 @@
-import asyncio
+"""
+Module defines coroutine to handle client connection and also functions and classes to help with it.
+
+Classes:
+Buffer -- Class for buffering data.
+Client -- Class storing information about client.
+
+Functions:
+read_full_message -- Check if there is full message in buffer and read it if there is.
+handle_client -- Coroutine to handle connection.
+recv_hello -- Handler called when client checks if nickname is available.
+recv_text -- Handler called when client sends text message.
+recv_active -- Handler called when client wants to know active users.
+"""
+from .message import read_message, create_message, read_type
 from collections import deque
 
 
@@ -14,17 +28,18 @@ class Buffer:
     length -- Number of bytes in buffer.
 
     Methods:
-    write() -- Write data to buffer, increase length.
-    read() -- Read data, remove from buffer and decrease length.
-    peek() -- Check first bytes of buffer without removing anything.
-    __gather_chunks() -- Return chunks with total length greater or equal than num or all chunks if
+    write -- Write data to buffer, increase length.
+    getvalue -- Return content of buffer without changing anything.
+    read -- Read data, remove from buffer and decrease length.
+    peek -- Check first bytes of buffer without removing anything.
+    __gather_chunks -- Return chunks with total length greater or equal than num or all chunks if
                          there is not enough and also length of these chunks.
-    __cut_last() -- Cut tail of a chunk.
+    __cut_last -- Cut tail of a chunk.
 
     Magic methods:
-    __init__() -- Initialize instance attributes.
-    __len__() -- Return number of bytes in buffer.
-    __repr__() -- Return 'Buffer(buffer_content)'.
+    __init__ -- Initialize instance attributes.
+    __len__ -- Return number of bytes in buffer.
+    __repr__ -- Return '<Buffer buffer_content>'
     """
     def __init__(self, init_data=b''):
         """Initialize instance attributes."""
@@ -47,12 +62,12 @@ class Buffer:
             self.length += len(data)
 
     def getvalue(self):
-        """Return content of buffer without changing anything else."""
+        """Return content of buffer without changing anything."""
         return b''.join(self.buffer)
 
     def __repr__(self):
-        """Return 'Buffer(buffer_content)'."""
-        return 'Buffer(' + repr(self.getvalue()) + ')'
+        """Return '<Buffer buffer_content>'."""
+        return '<Buffer ' + repr(self.getvalue()) + '>'
 
     def read(self, num):
         """
@@ -139,27 +154,53 @@ def read_full_message(buffer):
     """
     Check if there is full message in the buffer and if there is, read it.
 
-    Function just peeks at first two bytes in buffer and treats them as message length. Then it checks if there is
+    Function just peeks at first three bytes in buffer and treats them as message length. Then it checks if there is
     enough bytes in the buffer. Buffer may be modified in this function.
 
     Args:
-    buffer -- Buffer to check. It should have read and peek methods like Buffer defined in this module.
+    buffer -- Buffer to check.
 
     Returns:
     Message if it is found, empty bytes object otherwise.
     """
-    len_bytes = buffer.peek(2)
-    if len(len_bytes) < 2:
+    len_bytes = buffer.peek(3)
+    if len(len_bytes) < 3:
         return b''
     msg_len = int.from_bytes(len_bytes, 'big')
-    if msg_len <= len(buffer) - 2:
-        buffer.read(2)  # Reading length out of buffer.
+    if msg_len <= len(buffer) - 3:
+        buffer.read(3)  # Reading length out of buffer.
         return buffer.read(msg_len)
     else:
         return b''
 
 
-async def handle_client(reader, writer, handlers, buffer, ending):
+class Client:
+    """
+    Class storing information about client.
+
+    Properties:
+    nicks_clients -- Mapping nicks of all active users to client instances.
+
+    Instance attributes:
+    writer -- StreamWriter object.
+    nick -- Nickname of user.
+    ending -- asyncio.Future indicating if connection should close.
+    receivers -- Receivers of client messages.
+    """
+    _nicks_clients = {}
+
+    def __init__(self, writer, ending, nick=None):
+        self.writer = writer
+        self.nick = nick
+        self.ending = ending
+        self.receivers = self.nicks_clients.values()
+
+    @property
+    def nicks_clients(self):
+        return self.__class__._nicks_clients
+
+
+async def handle_client(reader, writer, handlers, msg_types, ending):
     """
     Read message from client and handle it.
 
@@ -169,17 +210,57 @@ async def handle_client(reader, writer, handlers, buffer, ending):
     Args:
     reader -- Reader connected to client.
     writer -- Writer connected to client.
-    handlers -- Mapping bytes -> handlers.
-    buffer -- Object for buffering data.
+    handlers -- Mapping byte types to handlers.
+    msg_types -- Mapping message type names to byte types.
     ending -- Future indicating if coroutine should end.
     """
-    while not ending.done():
+    client = Client(writer, ending)
+    buffer = Buffer()
+
+    while not client.ending.done():
         data = await reader.read(read_size)
         buffer.write(data)
         while True:
             message = read_full_message(buffer)
             if not message:
                 break
-            handlers[message[-1:]](message=message, writer=writer)
+            msg_type, msg_bytes = read_type(message)
+            handlers[msg_type](message=msg_bytes, msg_types=msg_types, client=client)
 
     writer.close()
+
+
+def recv_hello(msg_types, message, client, **kwargs):
+    """
+    Handler called when client checks if nickname is available.
+
+    If nickname is not available connection is closed.
+    """
+    nick = read_message(message)
+    if nick in client.nicks_clients:
+        msg = create_message(content=nick.encode(), msg_type=msg_types['hello'])
+        client.writer.write(msg)
+        client.ending.set_result(True)
+    else:
+        client.nicks_clients[nick] = client
+        client.nickname = nick
+
+
+def recv_text(msg_types, message, client, **kwargs):
+    """
+    Handler called when client sends text message.
+
+    Message is just propagated to all receivers of the client.
+    """
+    for receiver in client.receivers:
+        receiver.writer.write(create_message(message, msg_types['text']))
+
+
+def recv_active(msg_types, client, **kwargs):
+    """Handler called when client wants to know active users."""
+    nicks = set(client.nicks_clients.keys())
+    if client.nick in nicks:
+        nicks.add(client.nick + ' (you)')
+        nicks.remove(client.nick)
+    active = '\n'.join(sorted(nicks)) + '\n'
+    client.writer.write(create_message(active.encode(), msg_types['text']))
