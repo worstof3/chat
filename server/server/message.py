@@ -1,74 +1,101 @@
 """
 Module defines functions to help creating, reading and handling messages.
 
+Messages are in the following format (\n are newlines added in processing):
+#header1\n
+section1\n
+#header2\n
+section2\n
+.
+.
+.
+#headerN\n
+sectionN\n
+#\n.
+For example
+#type\n
+type_of_message\n
+#content\n
+content_of_message\n
+#\n
+Headers can't have newlines.
+Newline and # characters in each section are escaped with backslash when message is created. In other words
+the only newline and # characters, which are not escaped are the ones added in process of message creation. It's
+acceptable to have # in header but not recommended.
+
 Functions:
-create_message -- Create message from byte content and type.
-read_message -- Return message content.
-read_type -- Return message byte type and rest of it.
-get_handlers -- Map types of messages to handlers.
-get_msg_types -- Map names of message types to bytes.
+cut_message -- Cut message to sections defined by headers.
+create_message -- Create message according to protocol described in module help.
+get_handlers -- Read handlers of messages from module.
 """
 import inspect
 
 
-def create_message(content, msg_type):
+def cut_message(msg_lines):
     """
-    Create message from byte content and type.
+    Cut message to sections defined by headers.
 
-    Created message is in following form:
-    First three bytes are binary representation of length of rest of the message.
-    Next there is binary content.
-    Last byte is type of message.
+    Each section is stored in returned dictionary. Dictionary key for each section is it's header (bytes object). Each
+    newline escaped with backslash is stored without backslash and each newline not escaped is removed. Escaped
+    # characters in each section are stored without backslash.
 
     Args:
-    content -- Content of the message.
-    msg_type -- Type of message (byte).
+    msg_lines -- Iterable of message lines. We assume only newline in each line is the one at the end.
 
     Returns:
-    Message in form described above.
+    Dictionary with cut message.
     """
-    msg_len = len(content) + 1
-    len_bytes = msg_len.to_bytes(3, 'big')
-    full_message = b''.join((len_bytes, content, msg_type))
-    return full_message
+    sections = {}
+    lines = iter(msg_lines)
+    header = next(lines)[1:-1]
+
+    while True:
+        if not header:
+            break
+        header_lines = []
+        for line in lines:
+            if line.startswith(b'#'):
+                break
+            line = line.replace(b'\\#', b'#')
+            if line.endswith(b'\\\n'):
+                line = line[:-2] + b'\n'
+            else:
+                line = line[:-1]
+            header_lines.append(line)
+        sections[header] = b''.join(header_lines)
+        header = line[1:-1]
+
+    return sections
 
 
-def read_message(message):
+def create_message(**kwargs):
     """
-    Read message content.
+    Create message according to protocol described in module help.
 
-    Right now this function only decodes content, but it may change in the future.
-
-    Args:
-    message -- Encoded message content.
-    """
-    content = message.decode()
-    return content
-
-
-def read_type(message):
-    """
-    Return message byte type and rest of it.
-
-    Args:
-    message -- Encoded message.
+    Each key in kwargs is treated as header and corresponding value is section content. As described above each newline
+    and # character in section content are escaped with backslash.
 
     Returns:
-    Tuple (message type, rest of message)
+    Created message.
     """
-    msg_type, msg_bytes = message[-1:], message[:-1]
-    return msg_type, msg_bytes
+    msg_lines = []
+    for header, content in kwargs.items():
+        msg_lines.append(b'#' + header.encode() + b'\n')
+        content = content.replace(b'\n', b'\\\n').replace(b'#', b'\\#')
+        msg_lines.append(content + b'\n')
+    msg_lines.append(b'#\n')
+    message = b''.join(msg_lines)
+    return message
 
 
-def get_handlers(msg_types, module):
+def get_handlers(module):
     """
-    Map types of messages to handlers.
+    Read handlers of messages from module.
 
-    Function reads handlers from module. It assumes that name of handler of message with type msg_type has form
-    recv_msg_type.
+    Function reads handlers from module. It treats each function with name starting with recv_ as handler and rest of
+    its name is considered as message type.
 
     Args:
-    msg_types -- Types of messages.
     module -- Module to read handlers from.
 
     Returns:
@@ -78,24 +105,6 @@ def get_handlers(msg_types, module):
     handlers = {}
     for name, f in functions:
         if name.startswith('recv_'):
-            msg_type = msg_types[name[5:]]
-            handlers[msg_type] = f
+            msg_type = name[5:]
+            handlers[msg_type.encode()] = f
     return handlers
-
-
-def get_msg_types(module):
-    """
-    Map names of message types to bytes.
-
-    Function reads names of all functions, which start with recv_ and maps them to subsequent bytes (first function
-    is mapped to \x00, second to \x01, etc.)
-
-    Returns:
-    Mapping types of messages to bytes.
-    """
-    functions = inspect.getmembers(module, inspect.isfunction)
-    msg_types = {}
-    for name, f in functions:
-        if name.startswith('recv_'):
-            msg_types[name[5:]] = len(msg_types).to_bytes(1, 'big')
-    return msg_types

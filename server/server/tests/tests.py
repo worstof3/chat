@@ -3,173 +3,107 @@ import unittest
 import unittest.mock as um
 from .. import server
 from .. import message
-import functools
-
-
-class TestBuffer(unittest.TestCase):
-    @staticmethod
-    def make_buffer(*args):
-        buffer = server.Buffer()
-        for chunk in args:
-            buffer.write(chunk)
-        return buffer
-
-    def test_writing(self):
-        buffer = server.Buffer()
-        buffer.write(b'a')
-        self.assertEqual(buffer.getvalue(), b'a')
-        self.assertEqual(len(buffer), 1)
-
-        buffer.write(b'abc')
-        self.assertEqual(buffer.getvalue(), b'aabc')
-        self.assertEqual(len(buffer), 4)
-
-    def test_gather_chunks(self):
-        buffer_contents = (
-            (b'ab', b'b'),
-            (b'',),
-            (b'a', b'b'),
-            (b'a', b'b'),
-            (b'ab', b'b'),
-        )
-        nums = (0, 1, 2, 1, 1)
-        real_results = (
-            ([], 0),
-            ([], 0),
-            ([b'a', b'b'], 2),
-            ([b'a'], 1),
-            ([b'ab'], 2)
-        )
-        buffer_lefts = (
-            b'abb',
-            b'',
-            b'',
-            b'b',
-            b'b'
-        )
-
-        for buffer_content, num, real_result, buffer_left in zip(buffer_contents, nums, real_results, buffer_lefts):
-            with self.subTest(buffer_content=buffer_content, num=num, real_result=real_result, buffer_left=buffer_left):
-                buffer = self.make_buffer(*buffer_content)
-                result = buffer._Buffer__gather_chunks(num)
-                self.assertTupleEqual(result, real_result)
-                self.assertEqual(buffer.getvalue(), buffer_left)
-
-    def test_cut_last(self):
-        chunk = b'abc'
-        real_results = (
-            (b'abc', b''),
-            (b'ab', b'c'),
-            (b'a', b'bc'),
-            (b'', b'abc'),
-        )
-        for length, real_result in zip(range(len(chunk)), real_results):
-            with self.subTest(length=length, real_result=real_result):
-                result = server.Buffer._Buffer__cut(chunk, length)
-                self.assertTupleEqual(result, real_result)
-
-    def test_read_remove(self):
-        buffer = self.make_buffer(b'abcdefghi')
-        nums = (0, 1, 3, 10, 3)
-        datas = (
-            b'',
-            b'a',
-            b'bcd',
-            b'efghi',
-            b'',
-        )
-        buffer_contents = (
-            b'abcdefghi',
-            b'bcdefghi',
-            b'efghi',
-            b'',
-            b'',
-        )
-
-        for num, data, buffer_content in zip(nums, datas, buffer_contents):
-            with self.subTest(num=num, data=data, buffer_content=buffer_content):
-                read_data = buffer.read(num)
-                self.assertEqual(read_data, data)
-                self.assertEqual(buffer.getvalue(), buffer_content)
-
-    def test_peek(self):
-        buffer = self.make_buffer(b'')
-        read_data = buffer.peek(3)
-        self.assertEqual(read_data, b'')
-        self.assertEqual(buffer.getvalue(), b'')
-
-        buffer = self.make_buffer(b'abcdefghi')
-        nums = (0, 1, 5, 100)
-        datas = (
-            b'',
-            b'a',
-            b'abcde',
-            b'abcdefghi'
-        )
-
-        for num, data in zip(nums, datas):
-            with self.subTest(num=num, data=data):
-                read_data = buffer.peek(num)
-                self.assertEqual(read_data, data)
-                self.assertEqual(buffer.getvalue(), b'abcdefghi')
+import warnings
+warnings.simplefilter('always', ResourceWarning)
 
 
 class TestServer(unittest.TestCase):
-    def test_read_full_message(self):
-        buffer = server.Buffer()
-        buffer.write(b'\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x00\x10\x00')
+    def test_handle_connection(self):
+        """Test if correct handlers are called."""
+        msg_lines = [
+            b'#type\n',
+            b'text\n',
+            b'#\n',
 
-        msg = server.read_full_message(buffer)
-        self.assertEqual(msg, b'\x00')
-        self.assertEqual(buffer.getvalue(), b'\x00\x00\x02\x00\x00\x00\x00\x10\x00')
+            b'#type\n',
+            b'hello\n',
+            b'#\n',
+        ]
+        i = -1
 
-        msg = server.read_full_message(buffer)
-        self.assertEqual(msg, b'\x00\x00')
-        self.assertEqual(buffer.getvalue(), b'\x00\x00\x10\x00')
+        async def mock_read():
+            nonlocal i
+            await asyncio.sleep(0.05)
+            i += 1
+            return msg_lines[i % len(msg_lines)]
 
-        msg = server.read_full_message(buffer)
-        self.assertEqual(msg, b'')
-        self.assertEqual(buffer.getvalue(), b'\x00\x00\x10\x00')
-
-    def test_handle_client(self):
-        async def mock_read(num):
-            await asyncio.sleep(0.1)
-            return b'\x00\x00\x01\x00\x00\x00\x02\x11\x01\x00\x00\x03\x00\x00\x02\x00'
-        mock_writer = um.Mock()
         mock_reader = um.Mock()
-        mock_reader.read = mock_read
+        mock_reader.readline = mock_read
         mock_handler1, mock_handler2, mock_handler3 = um.Mock(), um.Mock(), um.Mock()
-        handlers = {b'\x00': mock_handler1, b'\x01': mock_handler2, b'\x02': mock_handler3}
-        ending = asyncio.Future()
-
+        handlers = {b'hello': mock_handler1, b'text': mock_handler2, b'active': mock_handler3}
+        client = server.Client(mock_reader, um.Mock(), handlers)
+        client.__class__._recv_handlers = handlers
         loop = asyncio.get_event_loop()
-        handling = server.handle_client(mock_reader, mock_writer, handlers, um.Mock(), ending)
-        loop.call_later(0.5, functools.partial(ending.set_result, True))
+
+        handling = loop.create_task(client.handle_connection())
+        loop.call_later(0.5, handling.cancel)
         loop.run_until_complete(handling)
         mock_handler1.assert_called()
         mock_handler2.assert_called()
-        mock_handler3.assert_called()
+        mock_handler3.assert_not_called()
+
         loop.close()
 
 
 class TestMessage(unittest.TestCase):
-    def test_create_message(self):
-        contents = (
-            b'',
-            b'\x00',
-        )
-        msg_types = (
-            b'\x00',
-            b'\x01',
+    def test_cut_message(self):
+        all_msg_lines = (
+            [
+                b'#type\n',
+                b'text\\\n',
+                b'\n',
+                b'#content\n',
+                b'message\n',
+                b'#\n',
+            ],
+            [
+                b'#type\n',
+                b'#\n',
+            ],
+            [
+                b'#\n',
+            ]
         )
         real_results = (
-            b'\x00\x00\x01\x00',
-            b'\x00\x00\x02\x00\x01'
+            {
+                b'type': b'text\n',
+                b'content': b'message',
+            },
+            {
+                b'type': b'',
+            },
+            {}
         )
 
-        for content, msg_type, real_result in zip(contents, msg_types, real_results):
-            with self.subTest(content=content, msg_type=msg_type, real_result=real_result):
-                self.assertEqual(message.create_message(content, msg_type), real_result)
+        for msg_lines, real_result in zip(all_msg_lines, real_results):
+            with self.subTest(msg_lines=msg_lines, real_result=real_result):
+                self.assertDictEqual(message.cut_message(msg_lines), real_result)
+
+    def test_create_message(self):
+        args = (
+            dict(type=b'text', content=b'Text message.\n'),
+            dict(type=b''),
+            dict(),
+        )
+        real_msgs = (
+            b'#type\ntext\n#content\nText message.\\\n\n#\n',
+            b'#type\n\n#\n',
+            b'#\n',
+        )
+
+        for arg, real_msg in zip(args, real_msgs):
+            with self.subTest(arg=arg, real_msg=real_msg):
+                self.assertEqual(message.create_message(**arg), real_msg)
+
+    def test_get_handlers(self):
+        mock_module = um.Mock()
+        mock_module.f = lambda: None
+        mock_module.recv_hello = lambda: None
+        mock_module.recv_text = lambda: None
+        mock_module.recvhi = lambda: None
+
+        handlers = message.get_handlers(mock_module)
+        self.assertDictEqual(handlers, {b'hello': mock_module.recv_hello, b'text': mock_module.recv_text})
 
 
 class TestHandlers(unittest.TestCase):
@@ -186,58 +120,48 @@ class TestHandlers(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_recv_hello(self):
-        server.Client._nicks_clients = {'user': um.Mock(), 'nick': um.Mock()}
-        mock_ending = um.Mock()
-        mock_client = server.Client(um.Mock(), mock_ending)
-        msg = b'user'
-        server.recv_hello(self.msg_types, msg, mock_client)
-        mock_client.writer.write.assert_called()
-        mock_ending.set_result.assert_called_with(True)
+        server.Client._nicks_clients = {b'user': um.Mock(), b'nick': um.Mock()}
+        mock_client = server.Client(um.Mock(), um.Mock(), um.Mock())
+        mock_client.ending = um.Mock()
+        mock_client.con_handling = um.Mock()
+        msg = {
+            b'type': b'hello',
+            b'nick': b'user',
+        }
 
-        msg = b'new_user'
-        server.recv_hello(self.msg_types, msg, mock_client)
-        self.assertIn('new_user', mock_client.nicks_clients)
+        server.recv_hello(msg, mock_client)
+        mock_client.writer.write.assert_called()
+        mock_client.con_handling.cancel.assert_called()
+
+        msg = {
+            b'type': b'hello',
+            b'nick': b'new_user'
+        }
+
+        server.recv_hello(msg, mock_client)
+        self.assertIn(b'new_user', mock_client.nicks_clients)
 
     def test_recv_text(self):
-        server.Client._nicks_clients = {'user': server.Client(um.Mock(), um.Mock()),
-                                        'nick': server.Client(um.Mock(), um.Mock())}
-        mock_client = server.Client(um.Mock(), um.Mock())
+        server.Client._nicks_clients = {b'user': server.Client(um.Mock(), um.Mock(), um.Mock()),
+                                        b'nick': server.Client(um.Mock(), um.Mock(), um.Mock())}
+        mock_client = server.Client(um.Mock(), um.Mock(), um.Mock())
+        msg = {
+            b'type': b'text',
+            b'text': b'Text.\n'
+        }
 
-        server.recv_text(self.msg_types, b'text', mock_client)
-        mock_client.nicks_clients['user'].writer.write.assert_called_with(b'\x00\x00\x05text\x01')
-        mock_client.nicks_clients['nick'].writer.write.assert_called_with(b'\x00\x00\x05text\x01')
+        server.recv_text(msg, mock_client)
+        mock_client.nicks_clients[b'user'].writer.write.assert_called_with(b'#type\ntext\n#text\nText.\\\n\n#\n')
+        mock_client.nicks_clients[b'nick'].writer.write.assert_called_with(b'#type\ntext\n#text\nText.\\\n\n#\n')
 
     def test_recv_active(self):
-        mock_client = server.Client(um.Mock(), um.Mock(), 'new_user')
-        server.Client._nicks_clients = {'user': server.Client(um.Mock(), um.Mock()),
-                                        'nick': server.Client(um.Mock(), um.Mock())}
+        mock_client = server.Client(um.Mock(), um.Mock(), um.Mock(), b'new_user')
+        server.Client._nicks_clients = {b'user': server.Client(um.Mock(), um.Mock(), um.Mock()),
+                                        b'nick': server.Client(um.Mock(), um.Mock(), um.Mock())}
 
-        server.recv_active(self.msg_types, mock_client)
-        mock_client.writer.write.assert_called_with(b'\x00\x00\x0bnick\nuser\n\x01')
+        server.recv_active(mock_client)
+        mock_client.writer.write.assert_called_with(b'#type\ntext\n#text\nnick\\\nuser\\\n\n#\n')
 
-        mock_client._nicks_clients['new_user'] = mock_client
-        server.recv_active(self.msg_types, mock_client)
-        mock_client.writer.write.assert_called_with(b'\x00\x00\x1anew_user (you)\nnick\nuser\n\x01')
-
-
-class TestScript(unittest.TestCase):
-    def test_get_msg_types(self):
-        mock_module = um.Mock()
-        mock_module.f = lambda: None
-        mock_module.recv_hello = lambda: None
-        mock_module.recv_text = lambda: None
-        mock_module.recvhi = lambda: None
-
-        msg_types = message.get_msg_types(mock_module)
-        self.assertDictEqual(msg_types, {'hello': b'\x00', 'text': b'\x01'})
-
-    def test_get_handlers(self):
-        mock_module = um.Mock()
-        mock_module.f = lambda: None
-        mock_module.recv_hello = lambda: None
-        mock_module.recv_text = lambda: None
-        mock_module.recvhi = lambda: None
-        msg_types = {'hello': b'\x00', 'text': b'\x01'}
-
-        handlers = message.get_handlers(msg_types, mock_module)
-        self.assertDictEqual(handlers, {b'\x00': mock_module.recv_hello, b'\x01': mock_module.recv_text})
+        mock_client._nicks_clients[b'new_user'] = mock_client
+        server.recv_active(mock_client)
+        mock_client.writer.write.assert_called_with(b'#type\ntext\n#text\nnew_user (you)\\\nnick\\\nuser\\\n\n#\n')
