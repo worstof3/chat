@@ -150,7 +150,6 @@ class Server:
         for client in self.clients:
             client.con_handling.cancel()
         self.server.close()
-        self.loop.run_until_complete(self.server.wait_closed())
 
 
 def recv_hello(message, client, **kwargs):
