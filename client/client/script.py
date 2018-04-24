@@ -34,7 +34,7 @@ def main():
 
     recv_handlers = message.get_handlers(client, 'recv_')
     send_handlers = message.get_handlers(client, 'send_')
-    cl = client.Client(loop, recv_handlers, send_handlers, sys.stdin, sys.stdout, args.address, args.port, args.nick)
+    cl = client.Client(loop, recv_handlers, send_handlers, args.address, args.port, args.nick)
     loop.add_signal_handler(signal.SIGINT, sigint_handler, cl)
     loop.add_reader(sys.stdin, got_stdin, cl)
 
