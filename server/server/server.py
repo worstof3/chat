@@ -118,7 +118,8 @@ class Server:
         client -- Client to be removed.
         """
         self.clients.remove(client)
-        del client.nicks_clients[client.nick]
+        if client.nick is not None:
+            del client.nicks_clients[client.nick]
 
     async def con_handler(self, reader, writer):
         """
